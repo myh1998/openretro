@@ -23,6 +23,8 @@ python lora_with_llm/try_this/prepare_openretro_uspto50k_for_screener.py \
 import argparse
 import csv
 import os
+import shutil
+import subprocess
 from typing import Dict, List, Optional, Tuple
 
 from datasets import Dataset, DatasetDict
@@ -191,10 +193,70 @@ def convert_openretro_uspto50k(input_dir: str, output_dir: str) -> None:
     })
 
 
+def _looks_like_openretro_repo(path: str) -> bool:
+    return os.path.isfile(os.path.join(path, "scripts", "config_metadata.sh"))
+
+
+def _resolve_repo_root(repo_dir: Optional[str], repo_url: str) -> str:
+    if repo_dir:
+        target = os.path.abspath(os.path.expanduser(repo_dir))
+        if not os.path.isdir(target):
+            raise FileNotFoundError(f"--repo_dir does not exist: {target}")
+        if not _looks_like_openretro_repo(target):
+            raise ValueError(f"--repo_dir does not look like an openretro repo: {target}")
+        return target
+
+    # 1) 优先尝试脚本所在仓库
+    script_repo = os.path.dirname(os.path.abspath(__file__))
+    if _looks_like_openretro_repo(script_repo):
+        return script_repo
+
+    # 2) 尝试当前工作目录
+    cwd = os.path.abspath(os.getcwd())
+    if _looks_like_openretro_repo(cwd):
+        return cwd
+
+    # 3) 若本地不存在，自动克隆到 ~/openretro
+    clone_target = os.path.abspath(os.path.expanduser("~/openretro"))
+    if not os.path.isdir(clone_target):
+        if shutil.which("git") is None:
+            raise EnvironmentError("git is required for auto-clone but was not found in PATH")
+        print(f"[info] openretro repo not found locally, cloning to: {clone_target}")
+        subprocess.check_call(["git", "clone", repo_url, clone_target])
+
+    if not _looks_like_openretro_repo(clone_target):
+        raise ValueError(
+            f"Auto-discovered repo path is invalid: {clone_target}. "
+            "Please pass --repo_dir explicitly."
+        )
+    return clone_target
+
+
+def _default_input_output(repo_root: str, input_dir: Optional[str], output_dir: Optional[str]) -> Tuple[str, str]:
+    in_dir = os.path.abspath(os.path.expanduser(input_dir)) if input_dir else os.path.join(
+        repo_root, "data", "USPTO_50k", "raw"
+    )
+    out_dir = os.path.abspath(os.path.expanduser(output_dir)) if output_dir else os.path.join(
+        repo_root, "data", "USPTO_50k", "hf_disk_screener"
+    )
+    return in_dir, out_dir
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input_dir", type=str, required=True, help="OpenRetro USPTO-50K 标准 split 数据目录")
-    ap.add_argument("--output_dir", type=str, required=True, help="输出为 datasets.save_to_disk 目录")
+    ap.add_argument("--repo_dir", type=str, default="", help="本地 openretro 仓库路径（可选）")
+    ap.add_argument(
+        "--repo_url",
+        type=str,
+        default="https://github.com/coleygroup/openretro.git",
+        help="当本地找不到仓库时，自动 clone 使用的仓库地址",
+    )
+    ap.add_argument("--input_dir", type=str, default="", help="OpenRetro USPTO-50K 标准 split 数据目录（可选）")
+    ap.add_argument("--output_dir", type=str, default="", help="输出为 datasets.save_to_disk 目录（可选）")
     args = ap.parse_args()
 
-    convert_openretro_uspto50k(args.input_dir, args.output_dir)
+    repo_root = _resolve_repo_root(args.repo_dir or None, args.repo_url)
+    input_dir, output_dir = _default_input_output(repo_root, args.input_dir or None, args.output_dir or None)
+
+    print("[info] resolved paths", {"repo_root": repo_root, "input_dir": input_dir, "output_dir": output_dir})
+    convert_openretro_uspto50k(input_dir, output_dir)
